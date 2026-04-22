@@ -1,0 +1,206 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# MARSTEK VENUS E – Helper-Definitionen & Zeitplan-Automation
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# INSTALLATION:
+#   Diese Datei enthält zwei Abschnitte:
+#
+#   1) HELPERS  → In configuration.yaml einbinden ODER
+#                 direkt über HA-UI anlegen (Einstellungen → Helfer)
+#
+#   2) AUTOMATION → In automations.yaml einfügen ODER
+#                   als neue Automation über HA-UI importieren
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# ABSCHNITT 1: HELPERS
+# In configuration.yaml so einbinden:
+#
+#   input_boolean: !include_dir_merge_named helpers/
+#   input_select:  !include_dir_merge_named helpers/
+#   input_number:  !include_dir_merge_named helpers/
+#
+# Oder einfach den Inhalt direkt in deine configuration.yaml kopieren.
+# ───────────────────────────────────────────────────────────────────────────────
+
+input_boolean:
+
+  marstek_enabled:
+    name: Marstek Steuerung aktiv
+    icon: mdi:battery-charging
+
+
+input_select:
+
+  marstek_day_night_mode:
+    name: Marstek Tag/Nacht Modus
+    options:
+      - Tag
+      - Nacht
+    initial: Tag
+    icon: mdi:weather-sunny
+
+
+input_number:
+
+  marstek_night_discharge_power:
+    name: Marstek Nacht-Entladeleistung
+    min: 0
+    max: 2000
+    step: 50
+    initial: 200
+    unit_of_measurement: W
+    mode: slider
+    icon: mdi:transmission-tower-export
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# ABSCHNITT 2: ZEITPLAN-AUTOMATION
+# Schaltet automatisch zwischen Tag- und Nachtmodus um.
+#
+# Passe die Uhrzeiten an deine Gegebenheiten an:
+#   - day_start:   Wann PV realistisch Überschuss liefert (z.B. 07:00)
+#   - night_start: Wann es dunkel wird / kein PV mehr (z.B. 21:00)
+#
+# Die Zeiten kannst du auch dynamisch machen (Sonnenauf/-untergang),
+# siehe Kommentar weiter unten.
+# ───────────────────────────────────────────────────────────────────────────────
+
+automation:
+
+  - id: marstek_day_night_schedule
+    alias: Marstek – Tag/Nacht Umschaltung
+    description: >
+      Schaltet den Marstek-Modus automatisch zwischen Tag und Nacht um.
+      Tagmodus: PV-Überschuss laden.
+      Nachtmodus: Feste Entladeleistung ins Haus.
+    mode: single
+
+    trigger:
+      # ── Feste Uhrzeiten ──────────────────────────────────────────────────────
+      - platform: time
+        at: "07:00:00"
+        id: day_start
+
+      - platform: time
+        at: "21:00:00"
+        id: night_start
+
+      # ── Optional: Sonnenaufgang / Sonnenuntergang (auskommentiert) ───────────
+      # Wenn du diese nutzen willst, die obigen time-Trigger auskommentieren
+      # und diese hier aktivieren. "offset" passt den Zeitpunkt an.
+      #
+      # - platform: sun
+      #   event: sunrise
+      #   offset: "+00:30:00"   # 30 Min nach Sonnenaufgang
+      #   id: day_start
+      #
+      # - platform: sun
+      #   event: sunset
+      #   offset: "-00:30:00"   # 30 Min vor Sonnenuntergang
+      #   id: night_start
+
+      # ── HA-Neustart: korrekten Modus wiederherstellen ────────────────────────
+      - platform: homeassistant
+        event: start
+        id: ha_start
+
+    action:
+      - choose:
+
+          # Tagmodus aktivieren
+          - conditions:
+              - condition: trigger
+                id: day_start
+            sequence:
+              - service: input_select.select_option
+                target:
+                  entity_id: input_select.marstek_day_night_mode
+                data:
+                  option: Tag
+
+          # Nachtmodus aktivieren
+          - conditions:
+              - condition: trigger
+                id: night_start
+            sequence:
+              - service: input_select.select_option
+                target:
+                  entity_id: input_select.marstek_day_night_mode
+                data:
+                  option: Nacht
+
+          # Nach HA-Neustart: Modus anhand aktueller Uhrzeit wiederherstellen
+          - conditions:
+              - condition: trigger
+                id: ha_start
+            sequence:
+              - if:
+                  - condition: time
+                    after: "07:00:00"
+                    before: "21:00:00"
+                then:
+                  - service: input_select.select_option
+                    target:
+                      entity_id: input_select.marstek_day_night_mode
+                    data:
+                      option: Tag
+                else:
+                  - service: input_select.select_option
+                    target:
+                      entity_id: input_select.marstek_day_night_mode
+                    data:
+                      option: Nacht
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BLUEPRINT-KONFIGURATION
+# So verknüpfst du die Helper mit dem Blueprint (marstek_venus_simple.yaml).
+# In automations.yaml einfügen oder über UI als neue Automation anlegen:
+# ═══════════════════════════════════════════════════════════════════════════════
+
+#  - alias: Marstek Venus E – Hauptsteuerung
+#    use_blueprint:
+#      path: marstek_venus_simple.yaml
+#      input:
+#        enabled_entity: input_boolean.marstek_enabled
+#        day_night_helper: input_select.marstek_day_night_mode
+#        day_value: "Tag"
+#        night_value: "Nacht"
+#
+#        # Sensoren – Entity-IDs anpassen:
+#        grid_power_sensor: sensor.DEIN_NETZ_SENSOR
+#        battery_soc_sensor: sensor.DEIN_SOC_SENSOR
+#        pv_power_sensor: sensor.DEIN_PV_SENSOR
+#
+#        # Marstek-Entities – Entity-IDs anpassen:
+#        rs485_switch_entity: switch.DEIN_RS485_SWITCH
+#        strategy_select_entity: select.DEIN_STRATEGY_SELECT
+#        action_select_entity: select.DEIN_ACTION_SELECT
+#        charge_power_entity: number.DEIN_CHARGE_POWER
+#        discharge_power_entity: number.DEIN_DISCHARGE_POWER
+#
+#        # Nacht-Entladeleistung – mit dem input_number-Helper verknüpfen:
+#        # ACHTUNG: Das ist ein fester Wert im Blueprint-Input, kein Entity-Ref.
+#        # Den Schieberegler-Wert holst du dir so in die Automation:
+#        # Erstelle eine zweite simple Automation die den Blueprint-Input
+#        # aktualisiert wenn sich input_number.marstek_night_discharge_power ändert.
+#        # Alternativ: Trage hier einfach deinen Standard-Wert ein und
+#        # ändere ihn über die Blueprint-UI wenn nötig.
+#        night_discharge_power: 200
+#
+#        # Tagmodus-Parameter (Defaults passen für die meisten Setups):
+#        export_threshold: 50
+#        charge_buffer: 30
+#        max_charge_power: 1200
+#        soc_max: 95
+#        min_pv_power: 100
+#
+#        # Nachtmodus-Parameter:
+#        soc_min: 10
+#        max_discharge_power: 800
+#
+#        # Allgemein:
+#        min_write_delta: 20

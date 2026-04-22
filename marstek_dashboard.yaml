@@ -1,0 +1,152 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# MARSTEK VENUS E – Lovelace Dashboard Card (Mushroom Cards)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# VORAUSSETZUNGEN:
+#   - Mushroom Cards installiert (via HACS)
+#   - Mushroom Cards Strategie (optional, für Chips)
+#
+# INSTALLATION:
+#   Dashboard → Bearbeiten → Karte hinzufügen → Manuell (YAML) → einfügen
+#
+# PLATZHALTER ERSETZEN:
+#   Suche & Ersetze folgende Strings mit deinen echten Entity-IDs:
+#
+#   DEIN_SOC_SENSOR          → z.B. sensor.marstek_battery_soc
+#   DEIN_GRID_SENSOR         → z.B. sensor.shelly_grid_power
+#   DEIN_PV_SENSOR           → z.B. sensor.solaranlage_pv_power
+#   DEIN_RS485_SWITCH        → z.B. switch.marstek_rs485
+#   DEIN_ACTION_SELECT       → z.B. select.marstek_force_mode
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+type: vertical-stack
+cards:
+
+  # ── Titel ──────────────────────────────────────────────────────────────────
+  - type: custom:mushroom-title-card
+    title: 🔋 Marstek Venus E
+    subtitle: Heimspeicher-Steuerung
+
+  # ── Steuerung: Enable + Tag/Nacht ─────────────────────────────────────────
+  - type: horizontal-stack
+    cards:
+
+      # Enable Toggle
+      - type: custom:mushroom-entity-card
+        entity: input_boolean.marstek_enabled
+        name: Steuerung
+        icon: mdi:power
+        icon_color: green
+        tap_action:
+          action: toggle
+        layout: vertical
+
+      # Tag/Nacht Modus – antippen wechselt den Modus
+      - type: custom:mushroom-select-card
+        entity: input_select.marstek_day_night_mode
+        name: Modus
+        icon: mdi:weather-sunny-alert
+        layout: vertical
+
+  # ── Schieberegler: Nacht-Entladeleistung ──────────────────────────────────
+  - type: custom:mushroom-number-card
+    entity: input_number.marstek_night_discharge_power
+    name: Nacht-Entladeleistung
+    icon: mdi:transmission-tower-export
+    icon_color: indigo
+    display_mode: slider
+    layout: horizontal
+
+  # ── Trennlinie ─────────────────────────────────────────────────────────────
+  - type: custom:mushroom-title-card
+    title: ""
+    subtitle: Live-Werte
+
+  # ── Live-Werte: SOC + Grid + PV ───────────────────────────────────────────
+  - type: horizontal-stack
+    cards:
+
+      # Batterie SOC
+      - type: custom:mushroom-entity-card
+        entity: DEIN_SOC_SENSOR
+        name: Batterie
+        icon: mdi:battery-high
+        icon_color: >
+          {% set soc = states('DEIN_SOC_SENSOR') | float(0) %}
+          {% if soc >= 80 %} green
+          {% elif soc >= 40 %} orange
+          {% else %} red
+          {% endif %}
+        layout: vertical
+
+      # Netzleistung
+      - type: custom:mushroom-entity-card
+        entity: DEIN_GRID_SENSOR
+        name: Netz
+        icon: mdi:transmission-tower
+        icon_color: >
+          {% set p = states('DEIN_GRID_SENSOR') | float(0) %}
+          {% if p < 0 %} green
+          {% elif p > 100 %} red
+          {% else %} grey
+          {% endif %}
+        layout: vertical
+
+      # PV-Leistung
+      - type: custom:mushroom-entity-card
+        entity: DEIN_PV_SENSOR
+        name: PV
+        icon: mdi:solar-panel
+        icon_color: yellow
+        layout: vertical
+
+  # ── Status-Chips: aktueller Betriebszustand ────────────────────────────────
+  - type: custom:mushroom-chips-card
+    chips:
+
+      # RS485 Verbindung
+      - type: entity
+        entity: DEIN_RS485_SWITCH
+        icon: mdi:serial-port
+        content_info: none
+        tap_action:
+          action: none
+
+      # Aktueller Force Mode (charge / discharge / stop)
+      - type: entity
+        entity: DEIN_ACTION_SELECT
+        icon: mdi:battery-arrow-up-outline
+        content_info: state
+
+      # Aktueller Tag/Nacht Modus als Chip
+      - type: entity
+        entity: input_select.marstek_day_night_mode
+        icon: mdi:theme-light-dark
+        content_info: state
+
+  # ── Batterie-Gauge ─────────────────────────────────────────────────────────
+  - type: gauge
+    entity: DEIN_SOC_SENSOR
+    name: SOC
+    unit: "%"
+    min: 0
+    max: 100
+    needle: true
+    severity:
+      green: 60
+      yellow: 30
+      red: 0
+
+  # ── Mini-Verlauf: Grid-Leistung letzte Stunde ──────────────────────────────
+  - type: history-graph
+    entities:
+      - entity: DEIN_GRID_SENSOR
+        name: Netzleistung
+      - entity: DEIN_PV_SENSOR
+        name: PV
+      - entity: DEIN_SOC_SENSOR
+        name: SOC (%)
+    hours_to_show: 2
+    refresh_interval: 30
+    title: Verlauf (2h)

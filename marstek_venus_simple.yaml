@@ -1,0 +1,456 @@
+blueprint:
+  name: Marstek Venus E – Simple Day/Night Controller
+  description: >
+    Einfacher Zweiphasen-Controller für den Marstek Venus E Heimspeicher.
+
+    TAGMODUS (day):
+      Lädt den Speicher mit dem verfügbaren PV-Überschuss auf.
+      Überschuss = negativer Grid-Wert (Export ins Netz).
+      Ladepower = |Grid-Export| abzüglich eines einstellbaren Puffers.
+      Kein Laden wenn SOC >= Max-SOC oder kein PV-Überschuss vorhanden.
+
+    NACHTMODUS (night):
+      Entlädt den Speicher mit einem festen, per Schieberegler einstellbaren Wert.
+      Kein Entladen wenn SOC <= Min-SOC.
+
+    Voraussetzungen:
+      - Grid Power Sensor: positiv = Import, negativ = Export
+      - RS485-Kommunikation via Modbus/Switch in HA
+      - Separate input_select-Entity zur Steuerung des Tagmodus ("Tag" / "Nacht")
+
+  domain: automation
+  homeassistant:
+    min_version: 2023.9.0
+
+  input:
+
+    # ── Aktivierung ────────────────────────────────────────────────────────────
+    enabled_entity:
+      name: Steuerung aktiv (input_boolean)
+      description: Schaltet den gesamten Blueprint ein/aus.
+      selector:
+        entity:
+          domain: input_boolean
+
+    # ── Modus-Auswahl ──────────────────────────────────────────────────────────
+    day_night_helper:
+      name: Tag/Nacht-Modus (input_select)
+      description: >
+        input_select mit mind. zwei Optionen.
+        Welche Texte "Tag" und "Nacht" entsprechen, wird unten konfiguriert.
+      selector:
+        entity:
+          domain: input_select
+
+    day_value:
+      name: Wert für Tagmodus
+      default: "Tag"
+      selector:
+        text: {}
+
+    night_value:
+      name: Wert für Nachtmodus
+      default: "Nacht"
+      selector:
+        text: {}
+
+    # ── Sensoren ───────────────────────────────────────────────────────────────
+    grid_power_sensor:
+      name: Netzleistung-Sensor
+      description: Positiv = Import aus dem Netz, Negativ = Export ins Netz.
+      selector:
+        entity:
+          domain: sensor
+
+    battery_soc_sensor:
+      name: Batterie SOC Sensor (%)
+      selector:
+        entity:
+          domain: sensor
+
+    pv_power_sensor:
+      name: PV-Leistung Sensor (W)
+      description: Wird genutzt um sicherzustellen dass PV aktiv ist.
+      selector:
+        entity:
+          domain: sensor
+
+    # ── Marstek Geräte-Entities ────────────────────────────────────────────────
+    rs485_switch_entity:
+      name: RS485 Control Switch
+      description: Switch der die RS485/Modbus-Verbindung aktiviert.
+      selector:
+        entity:
+          domain: switch
+
+    strategy_select_entity:
+      name: Marstek Strategy Select
+      description: Select-Entity für die Betriebsstrategie (z.B. "manual").
+      selector:
+        entity:
+          domain: select
+
+    action_select_entity:
+      name: Marstek Force Mode Select
+      description: Select-Entity für den Erzwingungsmodus (charge/discharge/stop).
+      selector:
+        entity:
+          domain: select
+
+    charge_power_entity:
+      name: Marstek Charge Power (number)
+      selector:
+        entity:
+          domain: number
+
+    discharge_power_entity:
+      name: Marstek Discharge Power (number)
+      selector:
+        entity:
+          domain: number
+
+    # ── Geräte-Werte (Strings) ─────────────────────────────────────────────────
+    device_manual_value:
+      name: Gerätewert für manuellen Modus
+      default: "manual"
+      selector:
+        text: {}
+
+    device_stop_value:
+      name: Gerätewert für Stop / Hold
+      default: "stop"
+      selector:
+        text: {}
+
+    device_charge_value:
+      name: Gerätewert für Laden
+      default: "charge"
+      selector:
+        text: {}
+
+    device_discharge_value:
+      name: Gerätewert für Entladen
+      default: "discharge"
+      selector:
+        text: {}
+
+    # ── Tagmodus-Parameter ─────────────────────────────────────────────────────
+    export_threshold:
+      name: Mindest-Überschuss zum Starten des Ladens (W)
+      description: >
+        Erst wenn der Grid-Export diesen Wert überschreitet, wird geladen.
+        Verhindert Pendeln bei kleinen Schwankungen.
+      default: 50
+      selector:
+        number:
+          min: 0
+          max: 500
+          step: 10
+          unit_of_measurement: "W"
+
+    charge_buffer:
+      name: Ladepuffer – Reserve im Netz-Export (W)
+      description: >
+        Dieser Betrag wird vom verfügbaren Export abgezogen bevor die
+        Ladeleistung gesetzt wird. So bleibt ein kleiner Export-Puffer.
+      default: 30
+      selector:
+        number:
+          min: 0
+          max: 200
+          step: 10
+          unit_of_measurement: "W"
+
+    max_charge_power:
+      name: Maximale Ladeleistung (W)
+      default: 1200
+      selector:
+        number:
+          min: 100
+          max: 3000
+          step: 50
+          unit_of_measurement: "W"
+
+    soc_max:
+      name: Maximaler SOC für Laden (%)
+      description: Über diesem Wert wird nicht mehr geladen.
+      default: 95
+      selector:
+        number:
+          min: 50
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+
+    min_pv_power:
+      name: Mindest-PV-Leistung für Laden (W)
+      description: Unter diesem Wert wird kein Laden gestartet (z.B. bei Bewölkung).
+      default: 100
+      selector:
+        number:
+          min: 0
+          max: 500
+          step: 10
+          unit_of_measurement: "W"
+
+    # ── Nachtmodus-Parameter ───────────────────────────────────────────────────
+    night_discharge_power:
+      name: Feste Entladeleistung nachts (W) – Schieberegler
+      description: >
+        Mit diesem Schieberegler stellst du ein, mit welcher konstanten Leistung
+        der Speicher nachts ins Haus entladen soll.
+        Tipp: Erstelle in HA ein input_number-Helper und verknüpfe ihn hier.
+      default: 200
+      selector:
+        number:
+          min: 0
+          max: 2000
+          step: 50
+          unit_of_measurement: "W"
+
+    soc_min:
+      name: Minimaler SOC für Entladen (%)
+      description: Unter diesem Wert wird nachts nicht mehr entladen.
+      default: 10
+      selector:
+        number:
+          min: 0
+          max: 50
+          step: 1
+          unit_of_measurement: "%"
+
+    max_discharge_power:
+      name: Maximale Entladeleistung (W)
+      default: 800
+      selector:
+        number:
+          min: 100
+          max: 3000
+          step: 50
+          unit_of_measurement: "W"
+
+    # ── Allgemeine Parameter ───────────────────────────────────────────────────
+    min_write_delta:
+      name: Minimale Änderung vor Schreibvorgang (W)
+      description: >
+        Verhindert unnötige Schreibzugriffe wenn sich die Zielleistung
+        kaum geändert hat. Reduziert RS485-Traffic.
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 5
+          unit_of_measurement: "W"
+
+# ── Automation ────────────────────────────────────────────────────────────────
+# Wichtig: mode: queued verhindert dass neue Trigger-Instanzen
+# laufende Writes abbrechen (kein selbst-störender Loop mehr).
+mode: queued
+max: 2
+max_exceeded: silent
+
+trigger:
+  # Alle 10 Sekunden als Basis-Takt – bewusst nicht zu schnell
+  - platform: time_pattern
+    seconds: "/10"
+
+  # Reagiert auf Modus-Wechsel sofort
+  - platform: state
+    entity_id: !input day_night_helper
+
+  # Reagiert auf Ein/Aus
+  - platform: state
+    entity_id: !input enabled_entity
+
+  # HA-Neustart
+  - platform: homeassistant
+    event: start
+
+action:
+  # ── Schritt 1: Alle Werte einlesen ──────────────────────────────────────────
+  - variables:
+      enabled: "{{ is_state(!input enabled_entity, 'on') }}"
+      mode_raw: "{{ states(!input day_night_helper) }}"
+      is_day: "{{ mode_raw == !input day_value }}"
+      is_night: "{{ mode_raw == !input night_value }}"
+
+      grid_power: "{{ states(!input grid_power_sensor) | float(0) }}"
+      soc: "{{ states(!input battery_soc_sensor) | float(0) }}"
+      pv_power: "{{ states(!input pv_power_sensor) | float(0) }}"
+
+      current_charge: "{{ states(!input charge_power_entity) | float(0) }}"
+      current_discharge: "{{ states(!input discharge_power_entity) | float(0) }}"
+
+      sensor_valid: >
+        {{ states(!input grid_power_sensor) not in ['unknown','unavailable','none','']
+           and states(!input battery_soc_sensor) not in ['unknown','unavailable','none',''] }}
+
+      # Tagmodus: Überschuss = wie viel exportieren wir gerade ins Netz?
+      # grid_power negativ = Export → Überschuss = |grid_power|
+      grid_export: "{{ [0 - grid_power, 0] | max }}"
+
+      # Ziel-Ladeleistung tagsüber
+      raw_charge_target: "{{ [grid_export - !input charge_buffer, 0] | max }}"
+      charge_target: "{{ [raw_charge_target, !input max_charge_power] | min | round(0) | int }}"
+
+      # Ziel-Entladeleistung nachts
+      discharge_target: "{{ [!input night_discharge_power, !input max_discharge_power] | min | round(0) | int }}"
+
+      # Bedingungen
+      can_charge: >
+        {{ soc < !input soc_max
+           and pv_power >= !input min_pv_power
+           and grid_export >= !input export_threshold }}
+
+      can_discharge: "{{ soc > !input soc_min }}"
+
+      # Was soll das Gerät tun?
+      final_action: >
+        {% if not enabled or not sensor_valid %}
+          stop
+        {% elif is_day %}
+          {% if can_charge %}
+            charge
+          {% else %}
+            stop
+          {% endif %}
+        {% elif is_night %}
+          {% if can_discharge %}
+            discharge
+          {% else %}
+            stop
+          {% endif %}
+        {% else %}
+          stop
+        {% endif %}
+
+      device_action_value: >
+        {% if final_action == 'charge' %}
+          {{ !input device_charge_value }}
+        {% elif final_action == 'discharge' %}
+          {{ !input device_discharge_value }}
+        {% else %}
+          {{ !input device_stop_value }}
+        {% endif %}
+
+  # ── Schritt 2: Abbrechen wenn deaktiviert oder Sensoren ungültig ─────────────
+  - condition: template
+    value_template: "{{ enabled and sensor_valid }}"
+
+  # ── Schritt 3: RS485 einschalten ─────────────────────────────────────────────
+  - if:
+      - condition: template
+        value_template: "{{ not is_state(!input rs485_switch_entity, 'on') }}"
+    then:
+      - service: switch.turn_on
+        target:
+          entity_id: !input rs485_switch_entity
+      - delay:
+          milliseconds: 500
+
+  # ── Schritt 4: Strategy auf "manual" setzen ───────────────────────────────────
+  # Nur einmal schreiben – kein Doppel-Write der neue Trigger auslöst!
+  - if:
+      - condition: template
+        value_template: "{{ not is_state(!input strategy_select_entity, !input device_manual_value) }}"
+    then:
+      - service: select.select_option
+        target:
+          entity_id: !input strategy_select_entity
+        data:
+          option: "{{ !input device_manual_value }}"
+      - delay:
+          milliseconds: 300
+
+  # ── Schritt 5: Force Mode setzen ─────────────────────────────────────────────
+  - if:
+      - condition: template
+        value_template: "{{ not is_state(!input action_select_entity, device_action_value) }}"
+    then:
+      - service: select.select_option
+        target:
+          entity_id: !input action_select_entity
+        data:
+          option: "{{ device_action_value }}"
+      - delay:
+          milliseconds: 200
+
+  # ── Schritt 6: Leistungswerte schreiben ───────────────────────────────────────
+  - choose:
+
+      # TAGMODUS: Laden
+      - conditions:
+          - condition: template
+            value_template: "{{ final_action == 'charge' }}"
+        sequence:
+          # Discharge auf 0 falls nötig
+          - if:
+              - condition: template
+                value_template: "{{ (current_discharge - 0) | abs >= !input min_write_delta }}"
+            then:
+              - service: number.set_value
+                target:
+                  entity_id: !input discharge_power_entity
+                data:
+                  value: 0
+          # Charge schreiben wenn Abweichung groß genug
+          - if:
+              - condition: template
+                value_template: "{{ (current_charge - charge_target) | abs >= !input min_write_delta }}"
+            then:
+              - service: number.set_value
+                target:
+                  entity_id: !input charge_power_entity
+                data:
+                  value: "{{ charge_target }}"
+
+      # NACHTMODUS: Entladen
+      - conditions:
+          - condition: template
+            value_template: "{{ final_action == 'discharge' }}"
+        sequence:
+          # Charge auf 0 falls nötig
+          - if:
+              - condition: template
+                value_template: "{{ (current_charge - 0) | abs >= !input min_write_delta }}"
+            then:
+              - service: number.set_value
+                target:
+                  entity_id: !input charge_power_entity
+                data:
+                  value: 0
+          # Discharge schreiben wenn Abweichung groß genug
+          - if:
+              - condition: template
+                value_template: "{{ (current_discharge - discharge_target) | abs >= !input min_write_delta }}"
+            then:
+              - service: number.set_value
+                target:
+                  entity_id: !input discharge_power_entity
+                data:
+                  value: "{{ discharge_target }}"
+
+      # STOP: Alles auf 0
+      - conditions:
+          - condition: template
+            value_template: "{{ final_action == 'stop' }}"
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ (current_charge - 0) | abs >= !input min_write_delta }}"
+            then:
+              - service: number.set_value
+                target:
+                  entity_id: !input charge_power_entity
+                data:
+                  value: 0
+          - if:
+              - condition: template
+                value_template: "{{ (current_discharge - 0) | abs >= !input min_write_delta }}"
+            then:
+              - service: number.set_value
+                target:
+                  entity_id: !input discharge_power_entity
+                data:
+                  value: 0
