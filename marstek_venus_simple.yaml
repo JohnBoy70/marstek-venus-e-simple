@@ -199,7 +199,6 @@ blueprint:
       description: >
         Mit diesem Schieberegler stellst du ein, mit welcher konstanten Leistung
         der Speicher nachts ins Haus entladen soll.
-        Tipp: Erstelle in HA ein input_number-Helper und verknüpfe ihn hier.
       default: 200
       selector:
         number:
@@ -244,104 +243,129 @@ blueprint:
           unit_of_measurement: "W"
 
 # ── Automation ────────────────────────────────────────────────────────────────
-# Wichtig: mode: queued verhindert dass neue Trigger-Instanzen
-# laufende Writes abbrechen (kein selbst-störender Loop mehr).
 mode: queued
 max: 2
 max_exceeded: silent
 
 trigger:
-  # Alle 10 Sekunden als Basis-Takt – bewusst nicht zu schnell
   - platform: time_pattern
     seconds: "/10"
 
-  # Reagiert auf Modus-Wechsel sofort
   - platform: state
     entity_id: !input day_night_helper
 
-  # Reagiert auf Ein/Aus
   - platform: state
     entity_id: !input enabled_entity
 
-  # HA-Neustart
   - platform: homeassistant
     event: start
 
 action:
-  # ── Schritt 1: Alle Werte einlesen ──────────────────────────────────────────
+  # ══════════════════════════════════════════════════════════════════════════════
+  # SCHRITT 1: Blueprint-Inputs als einfache Variablen bereitstellen
+  #
+  # REGEL: !input darf NIE innerhalb von {{ }} benutzt werden!
+  # Lösung: Erst alle !input-Werte in var_*-Variablen schreiben,
+  #         dann nur noch die Variablen in Jinja2-Templates nutzen.
+  # ══════════════════════════════════════════════════════════════════════════════
   - variables:
-      enabled: "{{ is_state(!input enabled_entity, 'on') }}"
-      mode_raw: "{{ states(!input day_night_helper) }}"
-      is_day: "{{ mode_raw == !input day_value }}"
-      is_night: "{{ mode_raw == !input night_value }}"
+      # Entity-IDs
+      var_enabled_entity:    !input enabled_entity
+      var_day_night_helper:  !input day_night_helper
+      var_grid_sensor:       !input grid_power_sensor
+      var_soc_sensor:        !input battery_soc_sensor
+      var_pv_sensor:         !input pv_power_sensor
+      var_rs485_switch:      !input rs485_switch_entity
+      var_strategy_select:   !input strategy_select_entity
+      var_action_select:     !input action_select_entity
+      var_charge_entity:     !input charge_power_entity
+      var_discharge_entity:  !input discharge_power_entity
+      # Konfigurations-Strings
+      var_day_value:         !input day_value
+      var_night_value:       !input night_value
+      var_manual_value:      !input device_manual_value
+      var_stop_value:        !input device_stop_value
+      var_charge_value:      !input device_charge_value
+      var_discharge_value:   !input device_discharge_value
+      # Numerische Parameter
+      var_export_threshold:      !input export_threshold
+      var_charge_buffer:         !input charge_buffer
+      var_max_charge_power:      !input max_charge_power
+      var_soc_max:               !input soc_max
+      var_min_pv_power:          !input min_pv_power
+      var_night_discharge_power: !input night_discharge_power
+      var_soc_min:               !input soc_min
+      var_max_discharge_power:   !input max_discharge_power
+      var_min_write_delta:       !input min_write_delta
 
-      grid_power: "{{ states(!input grid_power_sensor) | float(0) }}"
-      soc: "{{ states(!input battery_soc_sensor) | float(0) }}"
-      pv_power: "{{ states(!input pv_power_sensor) | float(0) }}"
+  # ══════════════════════════════════════════════════════════════════════════════
+  # SCHRITT 2: Zustand lesen & Entscheidungslogik berechnen
+  # Ab hier ausschliesslich var_*-Variablen in Templates verwenden.
+  # ══════════════════════════════════════════════════════════════════════════════
+  - variables:
+      enabled:   "{{ is_state(var_enabled_entity, 'on') }}"
+      mode_raw:  "{{ states(var_day_night_helper) }}"
+      is_day:    "{{ mode_raw == var_day_value }}"
+      is_night:  "{{ mode_raw == var_night_value }}"
 
-      current_charge: "{{ states(!input charge_power_entity) | float(0) }}"
-      current_discharge: "{{ states(!input discharge_power_entity) | float(0) }}"
+      grid_power:        "{{ states(var_grid_sensor) | float(0) }}"
+      soc:               "{{ states(var_soc_sensor) | float(0) }}"
+      pv_power:          "{{ states(var_pv_sensor) | float(0) }}"
+      current_charge:    "{{ states(var_charge_entity) | float(0) }}"
+      current_discharge: "{{ states(var_discharge_entity) | float(0) }}"
 
       sensor_valid: >
-        {{ states(!input grid_power_sensor) not in ['unknown','unavailable','none','']
-           and states(!input battery_soc_sensor) not in ['unknown','unavailable','none',''] }}
+        {{ states(var_grid_sensor) not in ['unknown','unavailable','none','']
+           and states(var_soc_sensor) not in ['unknown','unavailable','none',''] }}
 
-      # Tagmodus: Überschuss = wie viel exportieren wir gerade ins Netz?
-      # grid_power negativ = Export → Überschuss = |grid_power|
+      # Überschuss ins Netz (grid negativ = Export → positiver Export-Wert)
       grid_export: "{{ [0 - grid_power, 0] | max }}"
 
-      # Ziel-Ladeleistung tagsüber
-      raw_charge_target: "{{ [grid_export - !input charge_buffer, 0] | max }}"
-      charge_target: "{{ [raw_charge_target, !input max_charge_power] | min | round(0) | int }}"
+      # Ladeziel: Export minus Puffer, begrenzt auf Maximum
+      raw_charge_target: "{{ [grid_export - var_charge_buffer, 0] | max }}"
+      charge_target:     "{{ [raw_charge_target, var_max_charge_power] | min | round(0) | int }}"
 
-      # Ziel-Entladeleistung nachts
-      discharge_target: "{{ [!input night_discharge_power, !input max_discharge_power] | min | round(0) | int }}"
+      # Entladeziel: fester Wert, begrenzt auf Maximum
+      discharge_target: "{{ [var_night_discharge_power, var_max_discharge_power] | min | round(0) | int }}"
 
-      # Bedingungen
+      # Freigaben
       can_charge: >
-        {{ soc < !input soc_max
-           and pv_power >= !input min_pv_power
-           and grid_export >= !input export_threshold }}
+        {{ soc < var_soc_max
+           and pv_power >= var_min_pv_power
+           and grid_export >= var_export_threshold }}
 
-      can_discharge: "{{ soc > !input soc_min }}"
+      can_discharge: "{{ soc > var_soc_min }}"
 
-      # Was soll das Gerät tun?
+      # Endentscheidung
       final_action: >
         {% if not enabled or not sensor_valid %}
           stop
         {% elif is_day %}
-          {% if can_charge %}
-            charge
-          {% else %}
-            stop
-          {% endif %}
+          {% if can_charge %}charge{% else %}stop{% endif %}
         {% elif is_night %}
-          {% if can_discharge %}
-            discharge
-          {% else %}
-            stop
-          {% endif %}
+          {% if can_discharge %}discharge{% else %}stop{% endif %}
         {% else %}
           stop
         {% endif %}
 
+      # Gerätewert für den Force-Mode-Select
       device_action_value: >
         {% if final_action == 'charge' %}
-          {{ !input device_charge_value }}
+          {{ var_charge_value }}
         {% elif final_action == 'discharge' %}
-          {{ !input device_discharge_value }}
+          {{ var_discharge_value }}
         {% else %}
-          {{ !input device_stop_value }}
+          {{ var_stop_value }}
         {% endif %}
 
-  # ── Schritt 2: Abbrechen wenn deaktiviert oder Sensoren ungültig ─────────────
+  # ── Schritt 3: Abbrechen wenn deaktiviert oder Sensoren ungültig ─────────────
   - condition: template
     value_template: "{{ enabled and sensor_valid }}"
 
-  # ── Schritt 3: RS485 einschalten ─────────────────────────────────────────────
+  # ── Schritt 4: RS485 einschalten falls nötig ──────────────────────────────────
   - if:
       - condition: template
-        value_template: "{{ not is_state(!input rs485_switch_entity, 'on') }}"
+        value_template: "{{ not is_state(var_rs485_switch, 'on') }}"
     then:
       - service: switch.turn_on
         target:
@@ -349,24 +373,23 @@ action:
       - delay:
           milliseconds: 500
 
-  # ── Schritt 4: Strategy auf "manual" setzen ───────────────────────────────────
-  # Nur einmal schreiben – kein Doppel-Write der neue Trigger auslöst!
+  # ── Schritt 5: Strategy auf "manual" – nur schreiben wenn nötig ──────────────
   - if:
       - condition: template
-        value_template: "{{ not is_state(!input strategy_select_entity, !input device_manual_value) }}"
+        value_template: "{{ not is_state(var_strategy_select, var_manual_value) }}"
     then:
       - service: select.select_option
         target:
           entity_id: !input strategy_select_entity
         data:
-          option: "{{ !input device_manual_value }}"
+          option: "{{ var_manual_value }}"
       - delay:
           milliseconds: 300
 
-  # ── Schritt 5: Force Mode setzen ─────────────────────────────────────────────
+  # ── Schritt 6: Force Mode setzen – nur wenn nötig ────────────────────────────
   - if:
       - condition: template
-        value_template: "{{ not is_state(!input action_select_entity, device_action_value) }}"
+        value_template: "{{ not is_state(var_action_select, device_action_value) }}"
     then:
       - service: select.select_option
         target:
@@ -376,7 +399,7 @@ action:
       - delay:
           milliseconds: 200
 
-  # ── Schritt 6: Leistungswerte schreiben ───────────────────────────────────────
+  # ── Schritt 7: Leistungswerte schreiben ───────────────────────────────────────
   - choose:
 
       # TAGMODUS: Laden
@@ -384,20 +407,18 @@ action:
           - condition: template
             value_template: "{{ final_action == 'charge' }}"
         sequence:
-          # Discharge auf 0 falls nötig
           - if:
               - condition: template
-                value_template: "{{ (current_discharge - 0) | abs >= !input min_write_delta }}"
+                value_template: "{{ current_discharge | abs >= var_min_write_delta }}"
             then:
               - service: number.set_value
                 target:
                   entity_id: !input discharge_power_entity
                 data:
                   value: 0
-          # Charge schreiben wenn Abweichung groß genug
           - if:
               - condition: template
-                value_template: "{{ (current_charge - charge_target) | abs >= !input min_write_delta }}"
+                value_template: "{{ (current_charge - charge_target) | abs >= var_min_write_delta }}"
             then:
               - service: number.set_value
                 target:
@@ -410,20 +431,18 @@ action:
           - condition: template
             value_template: "{{ final_action == 'discharge' }}"
         sequence:
-          # Charge auf 0 falls nötig
           - if:
               - condition: template
-                value_template: "{{ (current_charge - 0) | abs >= !input min_write_delta }}"
+                value_template: "{{ current_charge | abs >= var_min_write_delta }}"
             then:
               - service: number.set_value
                 target:
                   entity_id: !input charge_power_entity
                 data:
                   value: 0
-          # Discharge schreiben wenn Abweichung groß genug
           - if:
               - condition: template
-                value_template: "{{ (current_discharge - discharge_target) | abs >= !input min_write_delta }}"
+                value_template: "{{ (current_discharge - discharge_target) | abs >= var_min_write_delta }}"
             then:
               - service: number.set_value
                 target:
@@ -438,7 +457,7 @@ action:
         sequence:
           - if:
               - condition: template
-                value_template: "{{ (current_charge - 0) | abs >= !input min_write_delta }}"
+                value_template: "{{ current_charge | abs >= var_min_write_delta }}"
             then:
               - service: number.set_value
                 target:
@@ -447,7 +466,7 @@ action:
                   value: 0
           - if:
               - condition: template
-                value_template: "{{ (current_discharge - 0) | abs >= !input min_write_delta }}"
+                value_template: "{{ current_discharge | abs >= var_min_write_delta }}"
             then:
               - service: number.set_value
                 target:
